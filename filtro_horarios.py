@@ -3,112 +3,107 @@
 
 import os
 import re
-from bs4 import BeautifulSoup
-from typing import List, Dict
+import csv
+import sys
+from typing import List, Dict, Set
 
 class FiltradorHorarios:
-    """Classe para filtrar horários de aulas em uma tabela HTML"""
+    """Classe para filtrar horários de aulas em uma tabela CSV"""
 
     def __init__(self):
         # Ajusta o regex para capturar horários com ou sem sala
         self.padrao_horario = re.compile(r'(\d[MTN]\d)(?:\([^)]+\))?')
 
-    def ler_arquivo_html(self, caminho: str) -> str:
+    def ler_arquivo_csv(self, caminho: str) -> List[str]:
         """
-        Lê o arquivo HTML do caminho especificado
-
-        Args:
-            caminho: Caminho do arquivo HTML
-
-        Returns:
-            Conteúdo do arquivo HTML
-
-        Raises:
-            FileNotFoundError: Se o arquivo não for encontrado
+        Lê o arquivo CSV do caminho especificado
         """
         try:
-            with open(caminho, 'r', encoding='windows-1252') as arquivo:
-                return arquivo.read()
-        except UnicodeDecodeError:
-            # Se falhar com windows-1252, tenta utf-8
             with open(caminho, 'r', encoding='utf-8') as arquivo:
-                return arquivo.read()
+                return list(csv.reader(arquivo))
         except FileNotFoundError:
             raise FileNotFoundError(f"Arquivo não encontrado: {caminho}")
         except Exception as e:
             raise Exception(f"Erro ao ler arquivo: {str(e)}")
 
-    def extrair_dados_tabela(self, html: str) -> List[Dict]:
+    def extrair_dados_tabela(self, linhas: list) -> List[Dict]:
         """
-        Extrai dados da tabela HTML
-
-        Args:
-            html: Conteúdo HTML
-
-        Returns:
-            Lista de dicionários com os dados das linhas
+        Extrai dados das linhas do CSV
         """
-        soup = BeautifulSoup(html, 'html.parser')
         dados = []
         codigo_atual = ""
         disciplina_atual = ""
 
-        # Procura todas as linhas que contêm dados de disciplinas
-        for linha in soup.find_all('tr'):
-            # Se é uma linha de título de disciplina (tem classe 't')
-            titulo = linha.find('td', class_='t')
-            if titulo and titulo.find('b'):
-                texto = titulo.find('b').text.strip()
-                partes = texto.split(' - ', 1)
-                codigo_atual = partes[0]
-                disciplina_atual = partes[1] if len(partes) > 1 else ""
-                print(f"DEBUG - Nova disciplina encontrada: {codigo_atual} - {disciplina_atual}")
+        for linha in linhas:
+            if not linha:  # Pula linhas vazias
                 continue
 
-            # Se é uma linha de dados (primeira célula tem classe 'sl')
-            colunas = linha.find_all('td')
-            primeira_coluna = linha.find('td', class_='sl')
-            if primeira_coluna and len(colunas) >= 9:
-                turma = primeira_coluna.text.strip()
-                horario = colunas[8].text.strip()  # Horário está na coluna 8
-                professor = colunas[9].text.strip() if len(colunas) > 9 else ""
+            # Procura por linhas que começam com código da disciplina
+            if linha[0].strip():
+                texto = linha[0].strip()
+                if " - " in texto and "Turma" not in texto and len(texto) > 5:
+                    partes = texto.split(" - ", 1)
+                    codigo_atual = partes[0].strip()
+                    disciplina_atual = partes[1].strip() if len(partes) > 1 else ""
+                    continue
 
-                # Debug: imprime os horários encontrados
-                print(f"DEBUG - Turma: {turma}")
-                print(f"DEBUG - Horário encontrado: {horario}")
-                horarios = [match.group(1) for match in self.padrao_horario.finditer(horario)]
-                print(f"DEBUG - Horários extraídos: {horarios}")
+            # Uma linha de dados de turma deve ter pelo menos 8 campos não vazios
+            campos_nao_vazios = [c.strip() for c in linha if c.strip()]
+            if len(campos_nao_vazios) >= 8:
+                # Verifica se é uma linha de dados válida (tem turma e horário)
+                turma = campos_nao_vazios[0]
+                for campo in campos_nao_vazios:
+                    if any(p in campo for p in ['(L', '(I', '(H', '(J']):
+                        horario = campo
+                        # Procura o professor no próximo campo não vazio após o horário
+                        idx_horario = campos_nao_vazios.index(campo)
+                        professor = campos_nao_vazios[idx_horario + 1] if idx_horario + 1 < len(campos_nao_vazios) else ""
 
-                dados.append({
-                    'codigo': codigo_atual,
-                    'disciplina': disciplina_atual,
-                    'turma': turma,
-                    'horario': horario,
-                    'professor': professor
-                })
+                        dados.append({
+                            'codigo': codigo_atual,
+                            'disciplina': disciplina_atual,
+                            'turma': turma,
+                            'horario': horario,
+                            'professor': professor
+                        })
+                        break
 
-        print(f"DEBUG - Total de dados extraídos: {len(dados)}")
         return dados
 
     def filtrar_horarios(self, dados: List[Dict], horario_busca: str) -> List[Dict]:
         """
         Filtra as aulas pelo horário especificado
-
-        Args:
-            dados: Lista de dicionários com os dados das aulas
-            horario_busca: Horário a ser buscado (ex: '2M1')
-
-        Returns:
-            Lista de aulas que contêm o horário buscado
         """
         resultados = []
 
         for aula in dados:
             # Encontra todos os horários no formato dTa (d=dia, T=turno, a=aula)
             horarios = [match.group(1) for match in self.padrao_horario.finditer(aula['horario'])]
-            print(f"DEBUG - Verificando horários {horarios} para {aula['turma']}")
 
             if horario_busca in horarios:
+                resultados.append(aula)
+
+        return resultados
+
+    def filtrar_varios_horarios(self, dados: List[Dict], horarios_busca: Set[str]) -> List[Dict]:
+        """
+        Filtra as aulas que tem todos seus horários dentro do conjunto informado
+
+        Args:
+            dados: Lista de dicionários com os dados das aulas
+            horarios_busca: Conjunto de horários permitidos (ex: {'2M1', '2M2', '4M3'})
+
+        Returns:
+            Lista de aulas que têm todos seus horários dentro do conjunto informado
+        """
+        resultados = []
+
+        for aula in dados:
+            # Encontra todos os horários da aula
+            horarios_aula = set(match.group(1) for match in self.padrao_horario.finditer(aula['horario']))
+
+            # Verifica se todos os horários da aula estão no conjunto de busca
+            if horarios_aula.issubset(horarios_busca):
                 resultados.append(aula)
 
         return resultados
@@ -116,12 +111,9 @@ class FiltradorHorarios:
     def exibir_resultados(self, resultados: List[Dict]):
         """
         Exibe os resultados formatados
-
-        Args:
-            resultados: Lista de aulas filtradas
         """
         if not resultados:
-            print("\nNenhuma aula encontrada com o horário especificado.")
+            print("\nNenhuma aula encontrada com o(s) horário(s) especificado(s).")
             return
 
         print("\nAulas encontradas:")
@@ -135,56 +127,66 @@ class FiltradorHorarios:
             print(f"Professor: {aula['professor']}")
             print("-" * 80)
 
+def validar_formato_horario(horario: str) -> bool:
+    """Valida se o horário está no formato correto"""
+    return bool(re.match(r'^[2-6][MTN][1-6]$', horario))
+
 def main():
     """Função principal do programa"""
     filtrador = FiltradorHorarios()
+    arquivo_csv = "attached_assets/pdf (2).csv"
 
     # Interface com o usuário
     print("=== Filtrador de Horários de Aulas ===\n")
+    print("1. Buscar por um horário específico")
+    print("2. Informar horários disponíveis")
 
-    # Busca arquivos HTML no diretório atual
-    arquivos_html = [f for f in os.listdir('.') if f.endswith('.html')]
+    opcao = input("\nEscolha uma opção (1-2): ").strip()
 
-    if not arquivos_html:
-        print("Erro: Nenhum arquivo HTML encontrado no diretório atual.")
-        return
+    if opcao == "1":
+        # Busca por horário específico
+        print("\nFormato do horário: dTa (d=dia[2-6], T=turno[M,T,N], a=aula[1-6])")
+        print("Exemplo: 2M1 (Segunda-feira, Manhã, primeira aula)")
+        horario = input("\nDigite o horário que deseja buscar: ").strip().upper()
 
-    # Lista arquivos disponíveis
-    print("Arquivos HTML disponíveis:")
-    for i, arquivo in enumerate(arquivos_html, 1):
-        print(f"{i}. {arquivo}")
+        if not validar_formato_horario(horario):
+            print("Erro: Formato de horário inválido.")
+            return
 
-    # Solicita escolha do arquivo
-    while True:
         try:
-            escolha = int(input("\nEscolha o número do arquivo (1-{}): ".format(len(arquivos_html))))
-            if 1 <= escolha <= len(arquivos_html):
-                arquivo_escolhido = arquivos_html[escolha-1]
-                break
-            print("Escolha inválida. Tente novamente.")
-        except ValueError:
-            print("Por favor, digite um número válido.")
+            conteudo = filtrador.ler_arquivo_csv(arquivo_csv)
+            dados = filtrador.extrair_dados_tabela(conteudo)
+            resultados = filtrador.filtrar_horarios(dados, horario)
+            filtrador.exibir_resultados(resultados)
+        except Exception as e:
+            print(f"\nErro ao processar arquivo: {str(e)}")
 
-    # Solicita o horário para filtrar
-    print("\nFormato do horário: dTa (d=dia[2-6], T=turno[M,T,N], a=aula[1-6])")
-    print("Exemplo: 2M1 (Segunda-feira, Manhã, primeira aula)")
+    elif opcao == "2":
+        # Busca por múltiplos horários
+        print("\nInforme os horários disponíveis separados por espaço")
+        print("Formato: dTa (d=dia[2-6], T=turno[M,T,N], a=aula[1-6])")
+        print("Exemplo: 2M1 2M2 4M3 6M1")
 
-    horario = input("\nDigite o horário que deseja buscar: ").strip().upper()
+        horarios_input = input("\nDigite os horários: ").strip().upper().split()
 
-    # Valida formato do horário
-    if not re.match(r'^[2-6][MTN][1-6]$', horario):
-        print("Erro: Formato de horário inválido.")
-        return
+        # Valida todos os horários
+        if not all(validar_formato_horario(h) for h in horarios_input):
+            print("Erro: Um ou mais horários estão em formato inválido.")
+            return
 
-    try:
-        # Processa o arquivo
-        conteudo_html = filtrador.ler_arquivo_html(arquivo_escolhido)
-        dados = filtrador.extrair_dados_tabela(conteudo_html)
-        resultados = filtrador.filtrar_horarios(dados, horario)
-        filtrador.exibir_resultados(resultados)
+        # Converte lista para conjunto para busca mais eficiente
+        horarios_busca = set(horarios_input)
 
-    except Exception as e:
-        print(f"\nErro ao processar arquivo: {str(e)}")
+        try:
+            conteudo = filtrador.ler_arquivo_csv(arquivo_csv)
+            dados = filtrador.extrair_dados_tabela(conteudo)
+            resultados = filtrador.filtrar_varios_horarios(dados, horarios_busca)
+            filtrador.exibir_resultados(resultados)
+        except Exception as e:
+            print(f"\nErro ao processar arquivo: {str(e)}")
+
+    else:
+        print("Opção inválida!")
 
 if __name__ == "__main__":
     main()
